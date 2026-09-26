@@ -48,9 +48,18 @@ def main():
     print("\n=== Rule-based baseline ===")
     print(classification_report(y_test, rule_preds))
 
+    with open(MODELS_DIR / "training_results.json") as f:
+        training_results = json.load(f)
+    logreg_report = training_results["Logistic Regression"]["malicious_metrics"]
+
     comparison = {
-        "XGBoost": classification_report(y_test, preds, output_dict=True)["1"],
         "Rule-based": classification_report(y_test, rule_preds, output_dict=True)["1"],
+        "Logistic Regression": {
+            "precision": logreg_report["precision"],
+            "recall": logreg_report["recall"],
+            "f1-score": logreg_report["f1_score"],
+        },
+        "XGBoost": classification_report(y_test, preds, output_dict=True)["1"],
     }
     with open(FIG_DIR / "comparison.json", "w") as f:
         json.dump(comparison, f, indent=2)
