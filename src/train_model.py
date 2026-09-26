@@ -1,85 +1,87 @@
+"""
+Model training for CyberShield AI: baseline + main model + anomaly detector.
+Run: python src/train_model.py
+"""
 import pandas as pd
-import numpy as np
 import joblib
 import json
+from pathlib import Path
 from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier, IsolationForest
 from sklearn.metrics import classification_report, confusion_matrix
 from imblearn.over_sampling import SMOTE
+import xgboost as xgb
 
-def run_training():
-    print("--- Starting Model Training and Evaluation ---")
+PROCESSED_DIR = Path("data/processed")
+MODELS_DIR = Path("models")
+MODELS_DIR.mkdir(exist_ok=True, parents=True)
 
-    # 1. Load data/processed/train.csv and test.csv, and the feature column list
-    print("Loading data...")
-    train_df = pd.read_csv('data/processed/train.csv')
-    test_df = pd.read_csv('data/processed/test.csv')
+def load_train_test():
+    train = pd.read_csv(PROCESSED_DIR / "train.csv")
+    test = pd.read_csv(PROCESSED_DIR / "test.csv")
+    with open(PROCESSED_DIR / "feature_columns.txt") as f:
+        feature_cols = f.read().splitlines()
+    X_train, y_train = train[feature_cols], train["is_malicious"]
+    X_test, y_test = test[feature_cols], test["is_malicious"]
+    return X_train, X_test, y_train, y_test, feature_cols
 
-    with open('data/processed/feature_columns.txt', 'r') as f:
-        feature_columns = [line.strip() for line in f if line.strip()]
-
-    X_train = train_df[feature_columns]
-    y_train = train_df['is_malicious']
-    X_test = test_df[feature_columns]
-    y_test = test_df['is_malicious']
-
-    print(f"Train data shape: {X_train.shape}, {y_train.shape}")
-    print(f"Test data shape: {X_test.shape}, {y_test.shape}")
-
-    # 2. Print the class balance of y_train before SMOTE
-    print("\n--- Class balance of y_train (before SMOTE) ---")
-    print(y_train.value_counts())
-
-    # 3. Apply SMOTE to the training set only
-    print("\nApplying SMOTE to training data...")
+def balance_classes(X_train, y_train):
     smote = SMOTE(random_state=42)
-    X_train_smote, y_train_smote = smote.fit_resample(X_train, y_train)
-    print("Class balance of y_train (after SMOTE):")
-    print(y_train_smote.value_counts())
+    return smote.fit_resample(X_train, y_train)
 
-    # 4. Train a scikit-learn LogisticRegression
-    print("\nTraining Logistic Regression model...")
-    model = LogisticRegression(max_iter=1000, random_state=42, n_jobs=-1) # n_jobs for parallel processing
-    model.fit(X_train_smote, y_train_smote)
-    print("Model training complete.")
+def train_baseline(X_train, y_train):
+    model = LogisticRegression(max_iter=1000, random_state=42)
+    model.fit(X_train, y_train)
+    return model
 
-    # 5. Evaluate on the untouched, original test set
-    print("\n--- Evaluating Model on Test Set ---")
-    y_pred = model.predict(X_test)
+def train_random_forest(X_train, y_train):
+    model = RandomForestClassifier(n_estimators=100, max_depth=15, random_state=42, n_jobs=-1)
+    model.fit(X_train, y_train)
+    return model
 
-    print("\nClassification Report:")
-    class_report = classification_report(y_test, y_pred, output_dict=True)
-    print(classification_report(y_test, y_pred))
+def train_xgboost(X_train, y_train, max_depth=8):
+    model = xgb.XGBClassifier(
+        n_estimators=150, max_depth=max_depth, learning_rate=0.1,
+        eval_metric="logloss", random_state=42
+    )
+    model.fit(X_train, y_train)
+    return model
 
-    print("\nConfusion Matrix:")
-    conf_matrix = confusion_matrix(y_test, y_pred)
-    print(conf_matrix)
+def train_isolation_forest(X_train):
+    model = IsolationForest(n_estimators=100, contamination=0.1, random_state=42)
+    model.fit(X_train)
+    return model
 
-    # 6. Specifically call out and print the F1-score, precision, and recall for the malicious class (class "1")
-    print("\n--- Metrics for Malicious Class (1) ---")
-    malicious_precision = class_report['1']['precision']
-    malicious_recall = class_report['1']['recall']
-    malicious_f1_score = class_report['1']['f1-score']
-    print(f"Precision (Malicious): {malicious_precision:.4f}")
-    print(f"Recall (Malicious):    {malicious_recall:.4f}")
-    print(f"F1-score (Malicious):  {malicious_f1_score:.4f}")
+def evaluate(model, X_test, y_test, name):
+    preds = model.predict(X_test)
+    report = classification_report(y_test, preds, output_dict=True)
+    cm = confusion_matrix(y_test, preds)
+    print(f"\n=== {name} ===\n{classification_report(y_test, preds)}\nConfusion matrix:\n{cm}")
+    return {"name": name, "report": report, "confusion_matrix": cm.tolist()}
 
-    # 7. Save the trained model and evaluation results
-    print("\nSaving model and evaluation results...")
-    joblib.dump(model, 'models/baseline_logreg.joblib')
-    print("Trained model saved to models/baseline_logreg.joblib")
+def main():
+    X_train, X_test, y_train, y_test, feature_cols = load_train_test()
+    X_train_bal, y_train_bal = balance_classes(X_train, y_train)
+    results = []
 
-    # Convert numpy array to list for JSON serialization
-    conf_matrix_list = conf_matrix.tolist()
+    baseline = train_baseline(X_train_bal, y_train_bal)
+    results.append(evaluate(baseline, X_test, y_test, "Logistic Regression (baseline)"))
+    joblib.dump(baseline, MODELS_DIR / "baseline_logreg.joblib")
 
-    evaluation_results = {
-        'classification_report': class_report,
-        'confusion_matrix': conf_matrix_list
-    }
-    with open('models/training_results.json', 'w') as f:
-        json.dump(evaluation_results, f, indent=4)
-    print("Evaluation results saved to models/training_results.json")
+    rf = train_random_forest(X_train_bal, y_train_bal)
+    results.append(evaluate(rf, X_test, y_test, "Random Forest"))
+    joblib.dump(rf, MODELS_DIR / "random_forest.joblib")
 
-    print("--- Model Training and Evaluation Complete ---")
+    xgb_model = train_xgboost(X_train_bal, y_train_bal, max_depth=8)  # confirmed best depth
+    results.append(evaluate(xgb_model, X_test, y_test, "XGBoost"))
+    joblib.dump(xgb_model, MODELS_DIR / "xgboost_main.joblib")
 
-if __name__ == '__main__':
-    run_training()
+    iso = train_isolation_forest(X_train_bal)
+    joblib.dump(iso, MODELS_DIR / "isolation_forest.joblib")
+
+    with open(MODELS_DIR / "training_results.json", "w") as f:
+        json.dump(results, f, indent=2)
+    print("\nAll models trained and saved to models/")
+
+if __name__ == "__main__":
+    main()
